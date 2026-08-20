@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Target {
+  id                   String         @id @default(cuid())
+  name                 String
+  url                  String
+  checkIntervalSeconds Int            @map("check_interval_seconds")
+  createdAt            DateTime       @default(now()) @map("created_at")
+  checks               Check[]
+  incidents            Incident[]
+  uptimeRollups        UptimeRollup[]
+
+  @@map("targets")
+}
+
+model Check {
+  id         String   @id @default(cuid())
+  targetId   String   @map("target_id")
+  checkedAt  DateTime @default(now()) @map("checked_at")
+  statusCode Int?     @map("status_code")
+  latencyMs  Int      @map("latency_ms")
+  isUp       Boolean  @map("is_up")
+  target     Target   @relation(fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@index([targetId, checkedAt])
+  @@map("checks")
+}
+
+model Incident {
+  id         String    @id @default(cuid())
+  targetId   String    @map("target_id")
+  startedAt  DateTime  @default(now()) @map("started_at")
+  resolvedAt DateTime? @map("resolved_at")
+  cause      String?
+  target     Target    @relation(fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@index([targetId, startedAt])
+  @@map("incidents")
+}
+
+model UptimeRollup {
+  id          String   @id @default(cuid())
+  targetId    String   @map("target_id")
+  periodStart DateTime @map("period_start")
+  totalChecks Int      @map("total_checks")
+  upChecks    Int      @map("up_checks")
+  target      Target   @relation(fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([targetId, periodStart])
+  @@map("uptime_rollups")
+}
