@@ -62,7 +62,7 @@ jobs:
       - name: Generate Prisma client
         working-directory: backend
         run: npx prisma generate
-        
+
       - name: Build backend
         working-directory: backend
         run: npm run build
@@ -81,8 +81,10 @@ jobs:
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key -r backend/dist backend/package.json backend/package-lock.json backend/prisma ${EC2_USER}@${EC2_HOST}:~/uptrack/backend/
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ecosystem.config.js ${EC2_USER}@${EC2_HOST}:~/uptrack/
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${EC2_USER}@${EC2_HOST} << 'EOF'
+            set -e
             cd ~/uptrack/backend
-            npm ci
+            npm ci --omit=dev
+            npm install --no-save prisma@^6.5.0
             npx prisma generate
             npx prisma migrate deploy
             cd ~/uptrack
