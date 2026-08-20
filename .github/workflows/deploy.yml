@@ -79,9 +79,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${EC2_USER}@${EC2_HOST} "mkdir -p ~/uptrack/backend ~/uptrack/logs"
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key -r backend/dist backend/package.json backend/package-lock.json backend/prisma ${EC2_USER}@${EC2_HOST}:~/uptrack/backend/
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ecosystem.config.js ${EC2_USER}@${EC2_HOST}:~/uptrack/
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${EC2_USER}@${EC2_HOST} << 'EOF'
+                    ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${EC2_USER}@${EC2_HOST} << 'EOF'
             cd ~/uptrack/backend
-            npm ci --omit=dev
+            npm ci
+            npx prisma generate
             npx prisma migrate deploy
             cd ~/uptrack
             pm2 reload ecosystem.config.js --env production || pm2 start ecosystem.config.js --env production
