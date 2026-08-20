@@ -1,159 +1,153 @@
-# uptrack
+# UpTrack
 
-A self-hosted uptime monitor built to demonstrate real AWS/DevOps skills: static React on S3/CloudFront, Express API + background worker on EC2 under PM2, PostgreSQL on RDS, and API Gateway with a VPC Link in production.
+An uptime/status monitor, built as a portfolio project to demonstrate hands-on AWS infrastructure and DevOps work rather than another PaaS deploy. A background worker polls a configurable list of targets on independent intervals and records status, latency, and incident history to Postgres; a public dashboard shows current status, uptime history, and response-time trends.
+
+**Live demo:** https://d3tqalcvoccwnc.cloudfront.net
+**API:** https://ik0jt2bkga.execute-api.us-west-2.amazonaws.com/status
+
+---
+
+## Why this architecture
+
+Most side projects ship on Vercel/Render/Railway and stop there. This one is deliberately built on persistent infrastructure instead, to demonstrate the skills that PaaS platforms abstract away entirely:
+
+- A real Linux server (EC2) running two long-lived processes under a process manager (PM2), configured to survive reboots via a proper systemd unit — not a container that restarts itself.
+- A private backend that is never directly reachable from the internet. Public traffic terminates at API Gateway, crosses a VPC Link into the VPC, hits an internal Application Load Balancer, and only then reaches the EC2 instance — the instance's application port is closed to everything except the load balancer.
+- Security groups scoped by reference to other security groups (least privilege), not broad CIDR ranges.
+- A real CI/CD pipeline (GitHub Actions) that builds, tests infrastructure assumptions, and deploys both halves of the stack independently on every push to `main` — no manual "run this script" step.
+- No serverless/Lambda anywhere. The point is demonstrating a persistent server setup, on purpose.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-  subgraph prod [Production]
-    CF[CloudFront] --> S3[S3 Static Frontend]
-    APIGW[API Gateway HTTP] --> VPCLink[VPC Link]
-    VPCLink --> EC2[EC2 Private]
-    EC2 --> API[PM2 api]
-    EC2 --> Worker[PM2 worker]
-    API --> RDS[(RDS Postgres)]
-    Worker --> RDS
-  end
-  Browser --> CF
-  Browser --> APIGW
+flowchart TB
+    Browser["Browser"]
+
+    subgraph CDN["Frontend delivery"]
+        CF["CloudFront\n(Origin Access Control)"]
+        S3["S3 bucket\n(private, static React build)"]
+        CF --> S3
+    end
+
+    subgraph API["API path"]
+        APIGW["API Gateway\nHTTP API"]
+        VPCLink["VPC Link"]
+        ALB["Internal ALB\n(no public IP)"]
+        TG["Target Group\n:3000"]
+        APIGW --> VPCLink --> ALB --> TG
+    end
+
+    subgraph EC2["Single EC2 instance (PM2)"]
+        APIProc["api process\n(Express REST API)"]
+        Worker["worker process\n(scheduler / checker)"]
+    end
+
+    DB[("PostgreSQL\n(RDS in prod)")]
+
+    Browser --> CF
+    Browser --> APIGW
+    TG --> APIProc
+    APIProc --> DB
+    Worker --> DB
+    Worker -.->|HTTP checks| Targets["Monitored targets\n(github.com, npmjs.com, etc.)"]
 ```
 
-### PM2 processes
+| Layer | Technology |
+|---|---|
+| Frontend | React + Vite + TypeScript, Tailwind CSS — static build, no SSR |
+| Frontend hosting | S3 (private) behind CloudFront, Origin Access Control |
+| Backend | Node.js + TypeScript + Express, behind a reverse proxy (respects `X-Forwarded-*`, reads port from env) |
+| Process management | PM2 running two processes (`api`, `worker`) on one EC2 instance, systemd-registered for reboot survival |
+| Database | PostgreSQL via Prisma ORM |
+| Public API entry | AWS API Gateway (HTTP API) → VPC Link → internal ALB — EC2 is never internet-facing |
+| CI/CD | GitHub Actions — independent frontend and backend deploy jobs on push to `main` |
 
-Two separate Node.js processes run on the same EC2 instance:
+## Data model
 
-| Process | Role |
-|---------|------|
-| **api** | Serves the REST API. Read-only for the public dashboard. |
-| **worker** | Polls configured URLs on their intervals and writes checks, incidents, and uptime rollups to Postgres. |
+- **`targets`** — id, name, url, check_interval_seconds, created_at
+- **`checks`** — id, target_id (FK), checked_at, status_code, latency_ms, is_up — indexed on `(target_id, checked_at)`
+- **`incidents`** — id, target_id (FK), started_at, resolved_at (nullable), cause (nullable)
 
-Both processes share the same database. There is no inter-process communication — the worker writes data, the API reads it.
-
-## Prerequisites
-
-- Node.js 20+
-- Docker (for local Postgres)
-- AWS CLI (for production deploys)
-
-## Local development
-
-### 1. Start Postgres
-
-```bash
-docker compose up -d
-```
-
-Local Postgres listens on **host port 5434** to avoid conflicting with other Postgres containers on 5432/5433.
-
-### 2. Backend setup
-
-```bash
-cd backend
-cp ../.env.example .env
-npm install
-npx prisma migrate dev
-npx prisma db seed
-```
-
-### 3. Run API and worker (separate terminals)
-
-```bash
-# Terminal A
-npm run dev:api
-
-# Terminal B
-npm run dev:worker
-```
-
-### 4. Frontend
-
-```bash
-cd frontend
-cp .env.example .env
-npm install
-npm run dev
-```
-
-Open [http://localhost:5173](http://localhost:5173). The dashboard polls the API every 30 seconds.
-
-## Environment variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | Yes | Postgres connection string |
-| `PORT` | No | API port (default `3000`) |
-| `API_KEY` | Yes | Secret for `POST /targets` via `X-API-Key` header |
-| `INCIDENT_FAILURE_THRESHOLD` | No | Consecutive failures before opening an incident (default `3`) |
-| `CHECK_TIMEOUT_MS` | No | HTTP check timeout in ms (default `10000`) |
-| `FRONTEND_ORIGIN` | No | Comma-separated CORS origins (default `http://localhost:5173`) |
-| `VITE_API_URL` | Frontend | API base URL at build time |
+**Incident detection** only opens an incident after N consecutive failed checks (default 3, configurable via `INCIDENT_FAILURE_THRESHOLD`) to avoid flapping on transient blips, and auto-resolves on the first successful check after opening.
 
 ## API
 
-### Public (read-only)
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/status` | Overall summary — powers the "all systems operational" banner |
+| `GET` | `/targets` | List all targets with current status |
+| `GET` | `/targets/:id` | Target detail |
+| `GET` | `/targets/:id/history?window=24h\|7d\|30d` | Check history + uptime % for the window |
+| `GET` | `/targets/:id/incidents` | Incident history |
+| `POST` | `/targets` | Add a target — requires the `API_KEY` header |
 
-- `GET /status` — overall system summary
-- `GET /targets` — all targets with current status and 24h uptime
-- `GET /targets/:id` — target detail
-- `GET /targets/:id/history?window=24h|7d|30d` — check history + uptime %
-- `GET /targets/:id/incidents` — incident history
-
-### Protected
-
-- `POST /targets` — add a target (requires `X-API-Key` header)
-
-```bash
-curl -X POST http://localhost:3000/targets \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: dev-secret-change-me" \
-  -d '{"name":"Example","url":"https://example.com","checkIntervalSeconds":60}'
-```
-
-## Production deployment
-
-GitHub Actions (`.github/workflows/deploy.yml`) runs on push to `main`:
-
-1. **deploy-frontend** — builds the Vite app, syncs `frontend/dist/` to S3, invalidates CloudFront
-2. **deploy-backend** — builds TypeScript, copies artifacts to EC2 via SSH, runs migrations, reloads PM2
-
-### GitHub secrets required
-
-| Secret | Used by |
-|--------|---------|
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Both jobs |
-| `S3_BUCKET`, `CF_DISTRIBUTION_ID`, `VITE_API_URL` | Frontend |
-| `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY` | Backend |
-
-On EC2, place a `.env` file in `~/uptrack/backend/` with production values (`DATABASE_URL`, `API_KEY`, etc.). PM2 loads it via `dotenv` at process start.
-
-> **Note:** SSH deploy is fine to start. Prefer [AWS Systems Manager Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html) long-term — no open port 22, IAM-based access, audit trail.
-
-### PM2 commands (on EC2)
+## Local development
 
 ```bash
-cd ~/uptrack
-pm2 start ecosystem.config.js --env production
-pm2 logs worker
-pm2 reload ecosystem.config.js --env production
-```
-
-## Testing
-
-```bash
+# backend
 cd backend
-npm test
+cp .env.example .env      # fill in DATABASE_URL, API_KEY, etc.
+npm install
+npx prisma migrate dev
+npm run db:seed
+npm run dev:api            # terminal 1
+npm run dev:worker          # terminal 2
+
+# frontend
+cd frontend
+npm install
+npm run dev                 # VITE_API_URL defaults to http://localhost:3000
 ```
 
-Vitest covers incident detection (consecutive failure threshold, auto-resolve) and uptime calculation (rollup merge, window boundaries).
+### Environment variables
 
-## Project structure
+**Backend**
 
-```
-uptrack/
-├── frontend/          # Vite + React + Tailwind (static S3 build)
-├── backend/           # Express API + worker + Prisma
-├── ecosystem.config.js
-├── docker-compose.yml
-└── .github/workflows/deploy.yml
-```
+| Variable | Purpose | Default |
+|---|---|---|
+| `DATABASE_URL` | Postgres connection string | required |
+| `PORT` | API listen port | `3000` |
+| `API_KEY` | Required header for `POST /targets` | required |
+| `INCIDENT_FAILURE_THRESHOLD` | Consecutive failures before opening an incident | `3` |
+| `CHECK_TIMEOUT_MS` | Per-check HTTP timeout | `10000` |
+| `FRONTEND_ORIGIN` | Comma-separated list of allowed CORS origins | `http://localhost:5173` |
+
+**Frontend**
+
+| Variable | Purpose |
+|---|---|
+| `VITE_API_URL` | Base URL the dashboard calls — baked in at build time |
+
+## Deployment
+
+Two independent PM2 processes run on the EC2 instance, defined in `ecosystem.config.js`:
+
+- **`api`** — the Express REST API
+- **`worker`** — the background scheduler, checking each target on its own `check_interval_seconds` interval, writing results to Postgres. A single target's failure is isolated and never blocks or crashes checks for other targets.
+
+PM2 is registered as a systemd service (`pm2 save` + `pm2 startup`), so a reboot of the EC2 instance restarts both processes automatically without manual intervention.
+
+### CI/CD
+
+`.github/workflows/deploy.yml` runs two jobs on every push to `main`:
+
+- **`deploy-frontend`** — installs deps, builds the Vite app with `VITE_API_URL` baked in, syncs the output to S3, invalidates the CloudFront cache.
+- **`deploy-backend`** — installs deps, builds the TypeScript backend, regenerates the Prisma client, copies the build artifacts to EC2 over SSH, runs `prisma migrate deploy` against production, and does a zero-downtime `pm2 reload`.
+
+SSH is used for the backend deploy today (key-based auth, no password access). AWS Systems Manager Session Manager is the better long-term answer — no inbound port 22 at all, IAM-based access, full audit trail — and is the natural next hardening step.
+
+## Engineering notes
+
+A few of the less obvious problems solved while building this, since "it deployed on the first try" is rarely the interesting part:
+
+- **API Gateway silently overriding backend CORS headers.** The Express API had correct `cors` middleware from the start, but the dashboard still failed with `No 'Access-Control-Allow-Origin' header` errors. Isolated the cause by testing the same request at three points in the chain — directly against `localhost:3000` (headers present and correct), through the internal ALB (fine), and through API Gateway (headers missing) — which narrowed it to API Gateway's own CORS configuration, which unconditionally replaces whatever CORS headers the backend integration returns, rather than passing them through. Fixed by configuring CORS correctly at the API Gateway layer instead of relying on the app.
+- **Least-privilege security group chaining.** The ALB only accepts inbound traffic from the VPC Link's security group; the EC2 instance only accepts the application port from the ALB's security group. Neither is reachable via a broad CIDR block — access is scoped security-group-to-security-group at every hop.
+- **PM2 environment reloads.** `pm2 restart` does not reliably reload environment variables from a `.env` file — `pm2 restart <name> --update-env` is required, otherwise a config change can silently keep running under the old environment.
+- **CI failure triage from masked logs.** GitHub Actions masks secret values in job logs, which makes a malformed-secret bug (an empty or whitespace-only value) look identical to a generic connection failure. Diagnosed by reading the job's own `env:` summary block — a genuinely empty secret prints with no mask at all, distinguishing it from a present-but-wrong one.
+- **Prisma CLI vs. runtime dependencies.** The backend deploy step originally ran `npm ci --omit=dev` to keep the EC2 install lean, but `prisma` (the CLI, used for `migrate deploy`) is a devDependency while `@prisma/client` (the runtime library) is not — so the omit flag silently broke migrations on the very first real deploy. Caught before it hit production by tracing exactly which package each command needed.
+
+## Known tradeoffs
+
+- SSH is open to `0.0.0.0/0` (key-auth only) so GitHub's runners can reach the instance — GitHub Actions doesn't originate from a fixed IP range. SSM Session Manager is the correct long-term fix.
+- Infrastructure was provisioned by hand through the AWS console rather than as Terraform/CloudFormation — reproducible by following the steps above, not by running one command.
+- No test gate in the deploy pipeline yet — `npm test` runs locally but isn't wired into `deploy.yml` as a required step before deploy.
