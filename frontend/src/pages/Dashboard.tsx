@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getTarget, getTargetHistory, getTargetIncidents, getTargets, getStatus } from '../api';
+import { AddTargetForm } from '../components/AddTargetForm';
 import { BackButton } from '../components/BackButton';
 import { TimeSeriesChart } from '../components/Charts';
 import { formatDuration, StatusBanner } from '../components/StatusBadge';
@@ -8,9 +9,16 @@ import { usePolling } from '../hooks/usePolling';
 import type { CheckPoint, HistoryWindow, Target } from '../types';
 
 export function DashboardPage() {
-  const { data: status, loading: statusLoading, error: statusError } = usePolling(getStatus);
-  const { data: targets, loading: targetsLoading, error: targetsError } = usePolling(getTargets);
+  const { data: status, loading: statusLoading, error: statusError, refresh: refreshStatus } =
+    usePolling(getStatus);
+  const { data: targets, loading: targetsLoading, error: targetsError, refresh: refreshTargets } =
+    usePolling(getTargets);
   const [sparklines, setSparklines] = useState<Record<string, CheckPoint[]>>({});
+
+  const handleTargetCreated = useCallback(() => {
+    refreshTargets();
+    refreshStatus();
+  }, [refreshTargets, refreshStatus]);
 
   const loadSparklines = useCallback(async (targetList: Target[]) => {
     const entries = await Promise.all(
@@ -54,6 +62,10 @@ export function DashboardPage() {
           <StatusBanner overall={status.overall} message={status.message} />
         </div>
       )}
+
+      <div className="mb-8">
+        <AddTargetForm onCreated={handleTargetCreated} />
+      </div>
 
       {targets && targets.length === 0 && (
         <p className="text-sm text-gray-500">No targets configured yet.</p>

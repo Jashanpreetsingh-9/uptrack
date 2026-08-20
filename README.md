@@ -79,7 +79,22 @@ flowchart TB
 | `GET` | `/targets/:id` | Target detail |
 | `GET` | `/targets/:id/history?window=24h\|7d\|30d` | Check history + uptime % for the window |
 | `GET` | `/targets/:id/incidents` | Incident history |
-| `POST` | `/targets` | Add a target — requires the `API_KEY` header |
+| `POST` | `/targets` | Add a target - requires the `X-Uptrack-Key` header (value = `API_KEY` env) |
+
+### Adding targets from the dashboard
+
+The homepage includes an **Add target** form (name, URL, check interval, API key). The key is sent as `X-Uptrack-Key` (not `X-API-Key` - API Gateway reserves that name) and kept in `sessionStorage` for the browser session. Without a valid key the form returns 401 - public visitors can still read status.
+
+If you use the live CloudFront site, the key must match **`API_KEY` on the EC2 backend**, not just your local `.env`. Also allow the `X-Uptrack-Key` header in API Gateway CORS settings.
+
+You can also add targets with curl:
+
+```bash
+curl -X POST http://localhost:3000/targets \
+  -H "Content-Type: application/json" \
+  -H "X-Uptrack-Key: $API_KEY" \
+  -d '{"name":"Example","url":"https://example.com","checkIntervalSeconds":60}'
+```
 
 ## Local development
 

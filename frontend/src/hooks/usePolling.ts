@@ -1,9 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 export function usePolling<T>(fetcher: () => Promise<T>, intervalMs = 30_000) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+
+  const refresh = useCallback(() => {
+    setTick((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,7 +40,7 @@ export function usePolling<T>(fetcher: () => Promise<T>, intervalMs = 30_000) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [fetcher, intervalMs]);
+  }, [fetcher, intervalMs, tick]);
 
-  return { data, loading, error };
+  return { data, loading, error, refresh };
 }
